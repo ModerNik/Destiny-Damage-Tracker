@@ -1,627 +1,278 @@
-#SingleInstance, Force
-SendMode Input
-SetWorkingDir, %A_ScriptDir%
+#Requires AutoHotkey v2.0
+SendMode 'Input'
+SetWorkingDir A_ScriptDir
 
-#Include %A_ScriptDir%\Gdip_all.ahk
+#Include Gdip_All.ahk  ; buliasz/AHKv2-Gdip library
 
-FileInstall, settings.txt, %A_ScriptDir%\settings.txt
-FileInstall, boss_health.txt, %A_ScriptDir%\boss_health.txt
+; === CSV PARSER ===
+LoadBossData() {
+    if !FileExist('boss_health.csv') {
+        MsgBox('boss_health.csv is missing!', 'Error')
+        ExitApp
+    }
 
+    bosses := Map(), categories := []
+    csv := FileRead('boss_health.csv')
+
+    Loop Parse, csv, '`n', '`r' {
+        if (A_LoopField = '' || InStr(A_LoopField, 'category,values'))
+            continue
+
+        parts := StrSplit(A_LoopField, ',', 2)
+        if (parts.Length < 2)
+            continue
+        category := Trim(parts[1], '" ')
+        json_str := Trim(parts[2], '" ')
+
+        boss_list := ParseJSONBosses(json_str)
+        categories.Push({ name: category, bosses: boss_list })
+
+        for boss in boss_list
+            bosses[boss.name] := boss
+    }
+
+    return { categories: categories, bosses: bosses }
+}
+
+ParseJSONBosses(json_str) {
+    bosses := []
+    json_str := RegExReplace(json_str, '\s', '')
+
+    if (!RegExMatch(json_str, '\[(.*?)\]', &match))
+        return bosses
+
+    array_content := match[1]
+
+    Loop Parse, array_content, '},{', '`n' {
+        obj_str := RegExReplace(A_LoopField, '^[{}]|[\s{}]', '')
+        if (obj_str = '')
+            continue
+
+        boss := { name: '', health: 0, final_stand: false }
+
+        if RegExMatch(obj_str, '"name":"([^"]+)"', &m)
+            boss.name := m[1]
+        if RegExMatch(obj_str, '"health":(\d+)', &m)
+            boss.health := m[1] + 0
+        if RegExMatch(obj_str, '"final_stand":(true|false)', &m)
+            boss.final_stand := (m[1] = 'true')
+
+        bosses.Push(boss)
+    }
+    return bosses
+}
+
+MsgBox(LoadBossData())
+
+; === MAIN SCRIPT ===
 pToken := Gdip_Startup()
+data := LoadBossData()
 
-global dps_phase_active := false
-global boss_health_pool := {}
-global boss_final_stand := {}
-global boss_list := ""
-FileRead, content, %A_ScriptDir%\boss_health.txt
-Loop, Parse, content, `n, `r
-{
-    StringSplit, line, A_LoopField, `,
-    boss_health_pool[Trim(line1)] := Trim(line2)
-    boss_final_stand[Trim(line1)] := Trim(line3)
-    boss_list := boss_list "|" line1
-}
+; Config - ADJUST THESE COORDINATES FOR YOUR SCREEN
+healthbar_area := '858|1302|845|3'  ; x|y|width|height
+health_colors := Map()
+current_boss := { name: 'Carl', health: 1500000, final_stand: false }
 
-Gui, settings: New
-Gui, settings: Add, DropDownList, w150 vBossName, 
-Gui, settings: Add, Button, gButtonOK, OK
+; State
+dps_phase_active := false, total_damage := 0, highest_dps := 0
+last_hp_percent := 100, time_of_last_damage := 0, dps_start_time := 0
+currently_shown := true
 
-global ColorBlind := "Normal"
-global brightnessLevel := 7
-global settingsGUIHotkey := "F2"  ; default settings
-global startAndStopDPS := "F3"
-global reloadScriptHotkey := "F5"
-global closeScriptHotkey := "F4"
-global includeDPSCalculations := 1
-global DPSatCrosshair := 0
-global includeEstimatedBossHealth := 1
-global includeBurstAndSustainedSpecifiers := 1
-global textColor := "white"
-global textFont := "Helvetica"
-global boldText := 1
-global showDamageDealt := 0
-global decimalPlacesHealthPercentage := 2
-global showDamageDuration := 0
-global estimateTimeToKill := 0
-global 1080pResolution := 0
-global manualDPSPhases := 0
-global isUltraWide := 0
-global boss_health_colors 
-global separateWindow := 0
+; === OVERLAY GUI ===
+overlay := Gui('-Caption +AlwaysOnTop +ToolWindow +E0x20 +LastFound')
+overlay.BackColor := '0x010101'
+WinSetTransColor('0x010101')
+overlay.MarginX := overlay.MarginY := 5
+overlay.SetFont('s20 cLime Bold', 'Consolas')
 
-get_settings()
+; UI Controls
+hp_percent := overlay.Add('Text', 'w280 h40 +Center vHPPercent cWhite', '100.00%')
+hp_total := overlay.Add('Text', 'w280 h30 +Center vHPTotal', '1.5M / 1.5M')
+dps_row1 := overlay.Add('Text', 'w135 h35 +Center vDPSAvg cWhite', 'Avg: 0')
+dps_row2 := overlay.Add('Text', 'x145 w135 h35 +Center vDPSHigh cWhite', 'High: 0')
+duration := overlay.Add('Text', 'w280 h30 +Center vDuration', 'Waiting...')
+boss_name := overlay.Add('Text', 'w280 h25 +Center cWhite vBossName', current_boss.name)
 
-global change_phase := 0
-global time_to_kill := 0
-global elapsed_time := 0
-global percent_dealt := 0
-global stop_loop := 0
-global get_back_in_loop := 0
-global healthbar_location := "858|1306|845|3"
-if (1080pResolution)
-    global healthbar_location := "644|977|634|1"
+overlay.Show('x900 y50 w290 h195 NoActivate')
 
-if (separateWindow)
-{
-    Gui, bossHealth: Color, 0x010101
-    Gui, bossHealth: +AlwaysOnTop +LastFound +E0x20
-    Gui, bossHealth: Font, % " s18 c" textColor, % textFont
+; === SETTINGS GUI ===
+settings := Gui('+Resize', 'Boss Selector')
+settings.SetFont('s12', 'Arial')
 
-    if (boldText)
-        Gui, bossHealth: Font, Bold
+category_list := settings.Add('DropDownList', 'x10 y10 w200 vCategory')
+for category in data.categories
+    category_list.Add(category.name)
 
-    height := 160
-    width := 420  ; Start with the width for PercentHealth and TotalHealth
+boss_list := settings.Add('DropDownList', 'x10 y40 w200 vBossName', 'Carl')
+UpdateBossList()
 
-    Gui, bossHealth: Add, Text, x110 y18 w200 h50 vPercentHealth +0x200 +Center
-    if (includeEstimatedBossHealth)
-        Gui, bossHealth: Add, Text, x10 y67 w400 h50 vTotalHealth +0x200 +Center
+status_label := settings.Add('Text', 'x10 y75 w300', 'F3: Toggle DPS | F2: Settings')
+start_btn := settings.Add('Button', 'x220 y70 w90 h30 +Default', 'Start Monitor')
 
-    if (showDamageDuration || estimateTimeToKill) {
-        width := 820  ; Add extra width for DamageDuration and TimeToKill
+category_list.OnEvent('Change', UpdateBossList)
+start_btn.OnEvent('Click', StartMonitoring)
+settings.Show('w320 h120')
 
-        if (showDamageDuration) {
-            Gui, bossHealth: Add, Text, x420 y30 w200 h50 vGUI_dps_phase +0x200 +Center
-            Gui, bossHealth: Add, Text, x620 y30 w200 h50 vDPSDuration +0x200
-        }
-
-        if (estimateTimeToKill) {
-            height := 200
-            Gui, bossHealth: Add, Text, x420 y120 w200 h50 vGUI_time_to_kill +0x200 +Center
-            Gui, bossHealth: Add, Text, x620 y120 w200 h50 vTimeToKill +0x200
+UpdateBossList(*) {
+    sel_cat := category_list.Text
+    boss_list.Delete()
+    for cat in data.categories {
+        if (cat.name = sel_cat) {
+            for boss in cat.bosses
+                boss_list.Add(boss.name)
+            break
         }
     }
-
-    if (includeDPSCalculations) {
-        height := 220  ; Add extra width for DPSCalculations
-
-        Gui, bossHealth: Font, s12
-        Gui, bossHealth: Add, Text, x10 y130 w200 h15 vGUI_burst +0x200 +Center
-        Gui, bossHealth: Add, Text, x210 y130 w200 h15 vGUI_sustained +0x200 +Center
-
-        Gui, bossHealth: Font, s18
-        Gui, bossHealth: Add, Text, x10 y150 w200 h50 vHighestDPS +0x200 +Center
-        Gui, bossHealth: Add, Text, x210 y150 w200 h50 vAverageDPS +0x200 +Center
-    }
-
-    Gui, bossHealth: Show, w%width% h%height%, DDT
-}
-Else if (1080pResolution)
-{
-    Gui, bossHealth: Color, 0x010101
-    Gui, bossHealth: -Caption +AlwaysOnTop +ToolWindow +LastFound +E0x20
-    Gui, bossHealth: Font, % " s12 c" textColor, % textFont
-    if (boldText)
-        Gui, bossHealth: Font, Bold
-    Gui, bossHealth: Add, Text, x860 y1020 w200 h20 vPercentHealth +0x200 +Center
-    Gui, bossHealth: Add, Text, x810 y1050 w300 h20 vTotalHealth +0x200 +Center
-
-    Gui, bossHealth: Add, Text, x1320 y1010 w200 h20 vGUI_dps_phase +0x200 +Center
-    Gui, bossHealth: Add, Text, x1520 y1010 w200 h20 vGUI_time_to_kill +0x200 +Center
-    Gui, bossHealth: Add, Text, x1320 y1040 w200 h20 vDPSDuration +0x200 +Center
-    Gui, bossHealth: Add, Text, x1520 y1040 w200 h20 vTimeToKill +0x200 +Center
-
-    Gui, bossHealth: Font, s10
-    Gui, bossHealth: Add, Text, x660 y1010 w200 h15 vGUI_burst +0x200 +Center
-    Gui, bossHealth: Add, Text, x1060 y1010 w200 h15 vGUI_sustained +0x200 +Center
-
-    if (DPSatCrosshair)
-    {
-        Gui, bossHealth: Font, s8
-        Gui, bossHealth: Add, Text, x760 y530 w200 h20 vHighestDPS +0x200 +Center
-        Gui, bossHealth: Add, Text, x960 y530 w200 h20 vAverageDPS +0x200 +Center
-    }
-    Else
-    {
-        Gui, bossHealth: Font, s12
-        Gui, bossHealth: Add, Text, x660 y1040 w200 h20 vHighestDPS +0x200 +Center
-        Gui, bossHealth: Add, Text, x1060 y1040 w200 h20 vAverageDPS +0x200 +Center
-    }
-
-    Gui, bossHealth: Show, x0 y0 h1080 NoActivate, DDT
-}
-Else 
-{
-    Gui, bossHealth: Color, 0x010101
-    Gui, bossHealth: -Caption +AlwaysOnTop +ToolWindow +LastFound +E0x20
-    Gui, bossHealth: Font, % " s18 c" textColor, % textFont
-    if (boldText)
-        Gui, bossHealth: Font, Bold
-    Gui, bossHealth: Add, Text, x300 y1350 w200 h50 vPercentHealth +0x200 +Center
-    Gui, bossHealth: Add, Text, x200 y1390 w400 h50 vTotalHealth +0x200 +Center
-
-    Gui, bossHealth: Add, Text, x950 y1340 w200 h50 vGUI_dps_phase +0x200 +Center
-    Gui, bossHealth: Add, Text, x1150 y1340 w200 h50 vGUI_time_to_kill +0x200 +Center
-    Gui, bossHealth: Add, Text, x950 y1380 w200 h50 vDPSDuration +0x200 +Center
-    Gui, bossHealth: Add, Text, x1150 y1380 w200 h50 vTimeToKill +0x200 +Center
-
-    Gui, bossHealth: Font, s12
-    Gui, bossHealth: Add, Text, x0 y1360 w200 h15 vGUI_burst +0x200 +Center
-    Gui, bossHealth: Add, Text, x600 y1360 w200 h15 vGUI_sustained +0x200 +Center
-
-    if (DPSatCrosshair)
-    {
-        Gui, bossHealth: Font, s12
-        Gui, bossHealth: Add, Text, x190 y690 w200 h50 vHighestDPS +0x200 +Center
-        Gui, bossHealth: Add, Text, x410 y690 w200 h50 vAverageDPS +0x200 +Center
-    }
-    Else
-    {
-        Gui, bossHealth: Font, s18
-        Gui, bossHealth: Add, Text, x0 y1380 w200 h50 vHighestDPS +0x200 +Center
-        Gui, bossHealth: Add, Text, x600 y1380 w200 h50 vAverageDPS +0x200 +Center
-    }
-
-    if (isUltraWide)
-    {
-        healthbar_location := "1298|1302|845|3"
-        Gui, bossHealth: Show, x1320 y0 h1440 NoActivate, DDT
-    }
-    Else
-        Gui, bossHealth: Show, x880 y0 h1440 NoActivate, DDT
 }
 
-if !(separateWindow)
-{
-    WinSet, Transparent, 255, DDT
-    WinSet, TransColor, 0x010101, DDT
-}
-
-if (showDamageDuration)
-    GuiControl bossHealth:, GUI_dps_phase, DPS Phase:
-if (estimateTimeToKill)
-    GuiControl bossHealth:, GUI_time_to_kill, Time To Kill:
-
-if (includeDPSCalculations)
-{
-    if (includeBurstAndSustainedSpecifiers && !(DPSatCrosshair))
-    {
-        GuiControl bossHealth:, GUI_burst, Burst:
-        GuiControl bossHealth:, GUI_sustained, Sustained:
-    }
-}
-
-if !(separateWindow)
-    SetTimer, check_destiny_open, 500
-global currently_shown := 1
-
-return
-
-get_settings()
-{
-    FileRead, settings, settings.txt
-
-    ; Parse each line of the settings
-    Loop, Parse, settings, `n, `r
-    {
-        ; Split the line into setting and value
-        StringSplit, line, A_LoopField, =
-        setting := Trim(line1)
-        value := Trim(line2)
-
-        ; Check each setting and assign the corresponding value
-        if (setting == "Reload Script Hotkey")
-            reloadScriptHotkey := value
-        if (setting == "Close Script Hotkey")
-            closeScriptHotkey := value
-        if (setting == "Settings GUI Hotkey")
-            settingsGUIHotkey := value
-        else if (setting == "Start And Stop DPS Phase")
-            startAndStopDPS := value
-        else if (setting == "Manually Start and Stop DPS Phases")
-            manualDPSPhases := ParseBooleanValue(value)
-        else if (setting == "Include DPS Calculations")
-            includeDPSCalculations := ParseBooleanValue(value)
-        else if (setting == "DPS Numbers Near Crosshair")
-            DPSatCrosshair := ParseBooleanValue(value)
-        else if (setting == "Decimal Places in Main Health Percentage")
-            decimalPlacesHealthPercentage := value
-        else if (setting == "Include Estimated Boss Health")
-            includeEstimatedBossHealth := ParseBooleanValue(value)
-        else if (setting == "Show Damage Dealt Instead of Boss Health")
-            showDamageDealt := ParseBooleanValue(value)
-        else if (setting == "Show Damage Phase Duration")
-            showDamageDuration := ParseBooleanValue(value)
-        else if (setting == "Show Estimated Time to Kill")
-            estimateTimeToKill := ParseBooleanValue(value)
-        else if (setting == "Include Burst and Sustained Specifiers")
-            includeBurstAndSustainedSpecifiers := ParseBooleanValue(value)
-        else if (setting == "GUI Text Color")
-            textColor := value
-        else if (setting == "GUI Text Font")
-            textFont := value
-        else if (setting == "Display info in a separate window")
-            separateWindow := ParseBooleanValue(value)
-        else if (setting == "Make Text Bold")
-            boldText := ParseBooleanValue(value)
-        else if (setting == "1920x1080")
-            1080pResolution := ParseBooleanValue(value)
-        else if (setting == "Ultrawide 1440p Monitor")
-            isUltraWide := ParseBooleanValue(value)
-        else if (setting == "Brightness Level")
-            brightnessLevel := value
-        else if (setting == "Colorblind Setting")
-            ColorBlind := value
-    }
-
-    ; brightnessIndex := brightnessLevel - 1
-    ; if (ColorBlind == "Normal" || ColorBlind == "normal")
-    ; {
-    ;     hexCodes := ["0xB86708", "0xE49422", "0xBE740D", "0xE69A2A", "0xC88113", "0xE8A032", "0xCC8918", "0xEAA73A", "0xD0901D", "0xECAD42", "0xD39621", "0xFFFFFF"] ; 0xD39621-0xEDB147 default, 0xFFFFFF for full white
-    ;     boss_health_colors := findAllColorsBetween(hexCodes[brightnessIndex*2-1], hexCodes[brightnessIndex*2])
-    ; }
-    ; else if (ColorBlind == "Deuteranopia" || ColorBlind == "deuteranopia")
-    ; {
-    ;     hexCodes := ["0x606121", "0x929252", "0x6E6A2E", "0x929252", "0x767A37", "0x989958", "0x7E8140", "0x9FA060", "0x868846", "0xA6A768", "0x8E8F4E", "0xAAAB6E"]
-    ;     boss_health_colors := findAllColorsBetween(hexCodes[brightnessIndex*2-1], hexCodes[brightnessIndex*2])
-    ; }
-    ; else if (ColorBlind == "Protanopia" || ColorBlind == "protanopia")
-    ; {
-    ;     hexCodes := ["0xA76B00", "0xD2A724", "0xAD7700", "0xD4A926", "0xB78500", "0xD8AD2A", "0xBF8A00", "0xDAAF2C", "0xBF9100", "0xDCB12F", "0xC49800", "0xDEB331"]
-    ;     boss_health_colors := findAllColorsBetween(hexCodes[brightnessIndex*2-1], hexCodes[brightnessIndex*2])
-    ; }
-    ; else if (ColorBlind == "Tritanopia" || ColorBlind == "tritanopia" )
-    ; {
-    ;     hexCodes := ["0x9E414F", "0xCC7F8D", "0xAC525F", "0xCE818E", "0xAF5A67", "0xD08391", "0xB56471", "0xD28694", "0xBA6A77", "0xD58A98", "0xBA727F", "0xD88F9B"]
-    ;     boss_health_colors := findAllColorsBetween(hexCodes[brightnessIndex*2-1], hexCodes[brightnessIndex*2])
-    ; }
-
-
-    Hotkey, %settingsGUIHotkey%, ShowSettingsGUI
-    Hotkey, %startAndStopDPS%, manualDPSPhase
-    Hotkey, %closeScriptHotkey%, close_the_script
-    Hotkey, %reloadScriptHotkey%, reload_the_script
-    Return
-}
-
-; Helper function to parse boolean values from the settings file
-ParseBooleanValue(value) {
-    if (value == "true" || value == "1" || value == "True" || value == "TRUE")
-        return 1
-    else
-        return 0
-}
-
-; hide the gui if destiny isnt currently in focus
-check_destiny_open:
-    IfWinActive, Destiny 2
-    {
-        if !(currently_shown)
-        {
-            Gui, bossHealth: Show, NoActivate
-            currently_shown := 1
+StartMonitoring(*) {
+    global current_boss
+    current_boss.name := boss_list.Text
+    for boss in data.bosses {
+        if (boss.name = current_boss.name) {
+            current_boss := boss
+            break
         }
     }
-    Else
-    {
-        if (currently_shown)
-        {
-            Gui, bossHealth: Hide
-            currently_shown := 0
+    boss_name.Text := current_boss.name
+    settings.Hide()
+    GenerateHealthColors()
+    SetTimer(MonitorLoop, 40)
+}
+
+GenerateHealthColors() {
+    global health_colors
+    ; Destiny 2 orange health bar colors
+    dark := 0xD39621, light := 0xEDB147
+    darkRGB := [211, 150, 33], lightRGB := [237, 177, 71]
+
+    health_colors.Clear()
+    for r in Range(darkRGB[1], lightRGB[1])
+        for g in Range(darkRGB[2], lightRGB[2])
+            for b in Range(darkRGB[3], lightRGB[3])
+                health_colors[Format('0x{:02X}{:02X}{:02X}', r, g, b)] := true
+}
+
+MonitorLoop() {
+    static loop_count := 0
+    loop_count++
+
+    ; Only show when Destiny 2 is active
+    if !WinActive('ahk_exe Destiny2.exe') {
+        if currently_shown {
+            overlay.Hide()
+            currently_shown := false
+        }
+        return
+    }
+
+    if !currently_shown {
+        overlay.Show('NoActivate')
+        currently_shown := true
+    }
+
+
+    pBitmap := Gdip_BitmapFromScreen(healthbar_area)
+    hp_percent := GetHealthPercent(pBitmap)
+    Gdip_DisposeImage(pBitmap)
+
+    UpdateDPS(hp_percent)
+    last_hp_percent := hp_percent
+
+    UpdateDisplay()
+}
+
+GetHealthPercent(pBitmap) {
+    global health_colors
+    Gdip_GetImageDimensions(pBitmap, &w, &h)
+
+    total_pixels := w * h
+    health_pixels := 0
+
+    Loop w {
+        Loop h {
+            color := Gdip_GetPixel(pBitmap, A_Index - 1, A_Index - 1)
+            if health_colors.Has(color)
+                health_pixels++
         }
     }
-Return
 
-; THIS CODE IS PROOF OF CONCEPT GENERATED BY AI
-; NEED TO BE REFACTORED AND TUNED FOR ACTUAL USE
-bossHealthPercentage(pBitmap, has_final=0)
-{
-    Gdip_GetImageDimensions(pBitmap, width, height)
-    
-    ; Sample single middle row for speed
-    rowY := height // 2
-    
-    ; Sample full and empty bar references for dynamic thresholds
-    fullColorAvg := samplePixelColor(pBitmap, 0, rowY)
-    emptyColorAvg := sampleDarkEmptyReference(pBitmap, width-1, rowY)
-    threshold := (fullColorAvg + emptyColorAvg) / 2
-    
-    filledColumns := 0
-    Loop % width {
-        colAvgColor := samplePixelColor(pBitmap, A_Index-1, rowY)
-        if (colAvgColor > threshold)
-            filledColumns++
+    return Round((health_pixels / total_pixels) * 100, 2)
+}
+
+UpdateDPS(current_hp) {
+    global
+
+    ; Auto-start DPS phase on damage
+    if (!dps_phase_active && current_hp < last_hp_percent) {
+        dps_phase_active := true
+        dps_start_time := A_TickCount
+        time_of_last_damage := A_TickCount
+        total_damage := highest_dps := 0
     }
-    
-    ; Adjust total columns for final bar sections
-    totalColumns := width
-    Loop % has_final {
-        totalColumns -= 2
-        if (!1080pResolution)
-            totalColumns -= 7
-    }
-    
-    return (filledColumns / totalColumns) * 100
-}
 
-samplePixelColor(pBitmap, colX, rowY)
-{
-    ARGB := Gdip_GetPixel(pBitmap, colX, rowY)
-    red := (ARGB >> 16) & 0xFF
-    green := (ARGB >> 8) & 0xFF
-    blue := ARGB & 0xFF
-    colorValue := (red * 0.55 + green * 0.35 + blue * 0.1)
-    return colorValue
-}
-
-sampleDarkEmptyReference(pBitmap, rightX, rowY)
-{
-    colAvg := samplePixelColor(pBitmap, rightX, rowY)
-    
-    ; If right side is still somewhat orange (full bar), use fixed dark threshold
-    if (colAvg > 30)
-        return 20
-    
-    return colAvg
-}
-
-
-Return
-
-; this is the main driving fucntion in this script
-calculateDPS(bossName)
-{
-    global start_health
-    global dps_start_time
-    global total_damage := 0
-    global highest_dps := 0
-    global last_boss_hp_percent
-    global time_of_last_damage
-    global boss_max_hp
-
-    stop_loop := 0
-
-    boss_max_hp := boss_health_pool[bossName]
-    final_stand := boss_final_stand[bossName]
-    
-    If (bossName == "default with final stand" || bossName == "default")
-        is_default := 1
-    Else
-        is_default := 0
-
-    if (showDamageDuration)
-        SetTimer, show_damage_duration, 50
-    if (estimateTimeToKill)
-        SetTimer, calculate_kill_time, 100
-
-    Loop,
-    {
-        if (currently_shown)
-        {
-            if (stop_loop)
-                Break
-
-            ; take a screenshot and find the boss health percentage
-            pBitmap := Gdip_BitmapFromScreen(healthbar_location)
-            boss_hp_percent := bossHealthPercentage(pBitmap, final_stand)
-
-            percent_dealt := 1 - (boss_hp_percent/100) ; temporary to help find boss actual health pools
-
-            ; calculate the total boss hp left or dealt depending on user preference
-            if (showDamageDealt)
-                boss_total_health := FormatWithCommas(Round((1-(boss_hp_percent/100))*boss_max_hp, 0))
-            Else
-                boss_total_health := FormatWithCommas(Round((boss_hp_percent/100)*boss_max_hp, 0))
-
-            ; if there is no damage phase currently active and the boss health goes down start a damage phase
-            if ((!dps_phase_active && boss_hp_percent < last_boss_hp_percent && !manualDPSPhases) || (change_phase && !dps_phase_active))
-            {
-                ; DPS phase starts
-                change_phase := 0
-                dps_phase_active := true
-                dps_start_time := A_TickCount
-                time_of_last_damage := A_TickCount
-            }
-
-            if (boss_hp_percent != last_boss_hp_percent && boss_hp_percent <= 0.1)
-            {
-                Sleep, 50
-                pBitmap := Gdip_BitmapFromScreen(healthbar_location)
-                boss_hp_percent := bossHealthPercentage(pBitmap, final_stand)
-            }
-
-            ; if the damage phase is active then calculate dps and related variables
-            else if (dps_phase_active)
-            {
-                ; damage dealt since last tick, and add it to the total damage dealt
-                damage_this_tick := (last_boss_hp_percent - boss_hp_percent) * boss_max_hp / 100
-                if (damage_this_tick > 0)
-                    total_damage += damage_this_tick
-
-                ; update the last time damage was dealt if boss hp changes
-                if (last_boss_hp_percent != boss_hp_percent)
-                    time_of_last_damage := A_TickCount
-
-                ; update the elapsed time
-                elapsed_time := Round((A_TickCount - dps_start_time) / 1000, 2)  ; Convert from ms to s
-
-                ; calculate the average dps and adjust highest dps if its changed
-                if (is_default)
-                {
-                    current_dps := Round((total_damage / elapsed_time), 3)
-                    if (elapsed_time >= 0.25)
-                        highest_dps :=  Round((max(highest_dps, current_dps)), 3)
-                }
-                Else
-                {
-                    current_dps := Round((total_damage / elapsed_time), 0)
-                    if (elapsed_time >= 0.25)
-                        highest_dps :=  Round((max(highest_dps, current_dps)), 0)
-                }
-
-                ; calculate the time to kill the boss based on the current dps and the hp left
-                time_to_kill := Round((boss_max_hp*(boss_hp_percent/100))/current_dps, 2)
-            }
-
-            ; if no damage dealt for 8 seconds end the dps phase
-            if (((A_TickCount - time_of_last_damage) >= 8000 && !manualDPSPhases) || (change_phase && dps_phase_active))
-            {
-                change_phase := 0
-                dps_phase_active := false
-                total_damage := 0
-                highest_dps := 0
-                if (includeDPSCalculations)
-                {
-                    GuiControl bossHealth:, HighestDPS, 0
-                    GuiControl bossHealth:, AverageDPS, 0
-                }
-                if (showDamageDuration)
-                    GuiControl bossHealth:, DPSDuration, 0
-                if (estimateTimeToKill)
-                    GuiControl bossHealth:, TimeToKill, 0
-            }
-
-            ; update the gui
-            if (last_boss_hp_percent != boss_hp_percent)
-            {
-                GuiControl bossHealth:, PercentHealth, % Round(boss_hp_percent, decimalPlacesHealthPercentage) "%"
-                if (includeEstimatedBossHealth && !(is_default))
-                    GuiControl bossHealth:, TotalHealth, % boss_total_health " / " FormatWithCommas(boss_max_hp)
-            }
-
-            if (dps_phase_active)
-            {
-                if (includeDPSCalculations)
-                {
-                    if (is_default)
-                    {
-                        GuiControl bossHealth:, AverageDPS, % FormatWithCommas(current_dps) "%"
-                        GuiControl bossHealth:, HighestDPS, % FormatWithCommas(highest_dps) "%"
-                    }
-                    Else
-                    {
-                        GuiControl bossHealth:, AverageDPS, % FormatWithCommas(current_dps)
-                        GuiControl bossHealth:, HighestDPS, % FormatWithCommas(highest_dps)
-                    }
-                } 
-
-                if (showDamageDuration)
-                    GuiControl bossHealth:, DPSDuration, % elapsed_time    
-                if (estimateTimeToKill)
-                    GuiControl bossHealth:, TimeToKill, % time_to_kill  
-            }    
-
-            ; update the last boss hp to be the current boss health
-            last_boss_hp_percent := boss_hp_percent
-            Sleep, 30
+    if (dps_phase_active) {
+        damage_this_tick := (last_hp_percent - current_hp) * current_boss.health / 100
+        if (damage_this_tick > 0) {
+            total_damage += damage_this_tick
+            time_of_last_damage := A_TickCount
         }
-        Else
-            Sleep, 100
+
+        elapsed := (A_TickCount - dps_start_time) / 1000
+        if (elapsed >= 0.25) {
+            current_dps := total_damage / elapsed
+            highest_dps := Max(highest_dps, current_dps)
+        }
+
+        ; End phase after 8s no damage
+        if (A_TickCount - time_of_last_damage >= 8000) {
+            dps_phase_active := false
+            total_damage := highest_dps := 0
+        }
     }
-    GuiControl bossHealth:, HighestDPS, 
-    GuiControl bossHealth:, AverageDPS, 
-    GuiControl bossHealth:, PercentHealth, 
-    GuiControl bossHealth:, TotalHealth,
-    stop_loop := 0
-    Return
 }
 
-calculate_kill_time:
-    if (dps_phase_active)
-        GuiControl bossHealth:, TimeToKill, % time_to_kill
-Return
+UpdateDisplay() {
+    global hp_percent, hp_total, dps_row1, dps_row2, duration, boss_name, current_boss
+    global dps_phase_active, total_damage, highest_dps, dps_start_time, last_hp_percent
 
-show_damage_duration:
-    if (dps_phase_active)
-        GuiControl bossHealth:, DPSDuration, % elapsed_time
-Return
+    hp_percent.Text := last_hp_percent '%'
+    hp_total.Text := FormatNumber(Round((last_hp_percent / 100) * current_boss.health)) ' / ' FormatNumber(current_boss.health)
 
-reset_dps_gui:
-    SetTimer, reset_dps_gui, Off
-    GuiControl bossHealth:, HighestDPS, 
-    GuiControl bossHealth:, AverageDPS, 
-Return
+    if (dps_phase_active) {
+        elapsed := Round((A_TickCount - dps_start_time) / 1000, 1)
+        current_dps := Round(total_damage / elapsed)
+        dps_row1.Text := 'Avg: ' FormatNumber(current_dps)
+        dps_row2.Text := 'High: ' FormatNumber(highest_dps)
+        duration.Text := elapsed 's'
+    } else {
+        dps_row1.Text := 'Avg: 0'
+        dps_row2.Text := 'High: 0'
+        duration.Text := 'Waiting for damage...'
+    }
+}
 
-FormatWithCommas(number)
+FormatNumber(num) => RegExReplace(num, '(\d)(?=(?:\d{3})+(?:\.|$))', '$1,')
+Range(start, end) {
+    result := []
+    Loop (end - start + 1)
+        result.Push(start + A_Index - 1)
+    return result
+}
+
+; === HOTKEYS ===
+F2:: settings.Show()
+F3::
 {
-    return RegExReplace(number, "(\d)(?=(?:\d{3})+(?:\.|$))", "$1,")
-}
-
-ButtonOK:
-    Gui, settings: Submit
-    Gui, settings: Hide
-    calculateDPS(BossName)
-return
-
-ShowSettingsGUI:
-    stop_loop := 1
-    boss_list := ""
-    FileRead, content, %A_ScriptDir%\boss_health.txt
-    Loop, Parse, content, `n, `r
-    {
-        StringSplit, line, A_LoopField, `,
-        boss_health_pool[Trim(line1)] := (Trim(line2), Trim(line3))
-        boss_list := boss_list "|" line1
+    global dps_phase_active, dps_start_time, total_damage, highest_dps, time_of_last_damage
+    dps_phase_active := !dps_phase_active
+    if (dps_phase_active) {
+        dps_start_time := A_TickCount
+        time_of_last_damage := A_TickCount
+        total_damage := highest_dps := 0
     }
-    GuiControl settings:, BossName, % boss_list
-    Gui, settings: Show
-Return
+}
+F4:: ExitApp
+F5:: Reload
 
-manualDPSPhase:
-    if (manualDPSPhases)
-        change_phase := 1
-Return
-
-; F5::
-;     Clipboard := percent_dealt
-; Return
-
-reload_the_script:
-    reload
-return
-
-close_the_script:
-    ExitApp
-return
-
-F6::
-    global sleep_time_seconds := 90
-    global startTime := A_TickCount
-    global beast := ""
-    global start_damage := percent_dealt
-    SetTimer, damage_test, % sleep_time_seconds*1000
-    SetTimer, increment_damage, 50
-return
-
-increment_damage:
-    temp_var := (percent_dealt - start_damage)*boss_max_hp
-    beast := beast "`n" (A_TickCount - startTime) . "," . temp_var
-return
-
-damage_test:
-    SetTimer, damage_test, off
-    SetTimer, increment_damage, off
-    damage_done := FormatWithCommas(Round((percent_dealt - start_damage)*boss_max_hp, 0))
-    temp_dps := FormatWithCommas(Round((percent_dealt - start_damage)*boss_max_hp/sleep_time_seconds, 0))
-    info = %damage_done% damage dealt in %sleep_time_seconds% seconds`n %temp_dps% DPS
-    Clipboard := info "`n" beast
-    MsgBox, % info
-
-    ; Save the data to a CSV file
-    FileDelete, dps.csv ; delete the old file if it exists
-    time := SubStr(A_Hour "-" A_Min "-" A_Sec, 1, 8)
-    FileAppend, %beast%, %time%.csv
-return
-
-
-^Esc::ExitApp
+OnExit((*) => (Gdip_Shutdown(pToken), overlay.Destroy()))
