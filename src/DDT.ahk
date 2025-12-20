@@ -28,9 +28,10 @@ Gui, settings: Add, Button, gButtonOK, OK
 
 global ColorBlind := "Normal"
 global brightnessLevel := 7
-global settingsGUIHotkey := "F5"  ; default settings
-global startAndStopDPS := "F2"
-global reloadScriptHotkey := "F4"
+global settingsGUIHotkey := "F2"  ; default settings
+global startAndStopDPS := "F3"
+global reloadScriptHotkey := "F5"
+global closeScriptHotkey := "F4"
 global includeDPSCalculations := 1
 global DPSatCrosshair := 0
 global includeEstimatedBossHealth := 1
@@ -45,7 +46,7 @@ global estimateTimeToKill := 0
 global 1080pResolution := 0
 global manualDPSPhases := 0
 global isUltraWide := 0
-global boss_health_colors 
+global boss_health_colors
 global separateWindow := 0
 
 get_settings()
@@ -55,7 +56,6 @@ global time_to_kill := 0
 global elapsed_time := 0
 global percent_dealt := 0
 global stop_loop := 0
-global get_back_in_loop := 0
 global healthbar_location := "858|1302|845|3"
 if (1080pResolution)
     global healthbar_location := "644|977|634|1"
@@ -221,6 +221,8 @@ get_settings()
         ; Check each setting and assign the corresponding value
         if (setting == "Reload Script Hotkey")
             reloadScriptHotkey := value
+        if (setting == "Close Script Hotkey")
+            closeScriptHotkey := value
         if (setting == "Settings GUI Hotkey")
             settingsGUIHotkey := value
         else if (setting == "Start And Stop DPS Phase")
@@ -261,31 +263,70 @@ get_settings()
             ColorBlind := value
     }
 
-    brightnessIndex := brightnessLevel - 1
+
+    ; Values are taken on full black/white backgrounds using color picker.
+
+    ; You can fill your own values to RGBMedians array.
+    ; It containts Red Green and Blue average value between darkest and brightest colors on particular setting
+    global RGBMedians
+    RGBMedians := Object()
     if (ColorBlind == "Normal" || ColorBlind == "normal")
     {
-        hexCodes := ["0xB86708", "0xE49422", "0xC1760D", "0xE69A2A", "0xC88113", "0xE8A032", "0xCC8918", "0xEAA73A", "0xD0901D", "0xECAD42", "0xD39621", "0xEDB147"]
-        boss_health_colors := findAllColorsBetween(hexCodes[brightnessIndex*2-1], hexCodes[brightnessIndex*2])
+        ; Normal
+        ; brightness | RGB Dark | RGB Bright
+        ; 1 | 181, 93, 5 | 231, 133, 23
+        ; 2 | 189, 106, 8 | 234, 145, 32
+        ; 3 | 198, 121, 13 | 237, 158, 44
+        ; 4 | 204, 132, 19 | 239, 167, 54
+        ; 5 | 208, 140, 24 | 240, 174, 62
+        ; 6 | 212, 147, 29 | 242, 179, 70
+        ; 7 | 214, 152, 33 | 242, 183, 76
+        RGBMedians:= [[206, 113, 14], [211, 125, 20], [217, 139, 28], [221, 149, 36], [224, 157, 43], [227, 163, 49], [228, 167, 54]]
     }
     else if (ColorBlind == "Deuteranopia" || ColorBlind == "deuteranopia")
     {
-        hexCodes := ["0x606121", "0x929252", "0x6E6A2E", "0x929252", "0x767A37", "0x989958", "0x7E8140", "0x9FA060", "0x868846", "0xA6A768", "0x8E8F4E", "0xAAAB6E"]
-        boss_health_colors := findAllColorsBetween(hexCodes[brightnessIndex*2-1], hexCodes[brightnessIndex*2])
+        ; Deuteranopia
+        ; brightness | RGB Dark | RGB Bright
+        ; 1 | 83, 84, 25 | 122, 123, 53
+        ; 2 | 96, 97, 35 | 135, 136, 65
+        ; 3 | 111, 112, 46 | 148, 149, 80
+        ; 4 | 123, 124, 57 | 158, 159, 92
+        ; 5 | 131, 132, 65 | 165, 166, 101
+        ; 6 | 139, 140, 73 | 171, 172, 109
+        ; 7 | 144, 145, 79 | 175, 176, 115
+        RGBMedians:= [[102, 103, 39], [115, 116, 50], [129, 130, 63], [140, 141, 74], [148, 149, 83], [155, 156, 91], [159, 160, 97]]
     }
     else if (ColorBlind == "Protanopia" || ColorBlind == "protanopia")
     {
-        hexCodes := ["0xA76B00", "0xD2A724", "0xAD7700", "0xD4A926", "0xB78500", "0xD8AD2A", "0xBF8A00", "0xDAAF2C", "0xBF9100", "0xDCB12F", "0xC49800", "0xDEB331"]
-        boss_health_colors := findAllColorsBetween(hexCodes[brightnessIndex*2-1], hexCodes[brightnessIndex*2])
+        ; Protanopia
+        ; brightness | RGB Dark | RGB Bright
+        ; 1 | 157, 95, 0 | 205, 135, 12
+        ; 2 | 167, 108, 0 | 211, 147, 18
+        ; 3 | 178, 123, 0 | 217, 160, 27
+        ; 4 | 186, 134, 0 | 221, 169, 35
+        ; 5 | 191, 142, 0 | 224, 175, 42
+        ; 6 | 196, 149, 0 | 226, 181, 49
+        ; 7 | 199, 154, 0 | 228, 185, 53
+        RGBMedians:= [[181, 113, 6], [189, 127, 9], [197, 141, 13], [203, 151, 17], [207, 158, 21], [211, 165, 24], [213, 169, 26]]
     }
     else if (ColorBlind == "Tritanopia" || ColorBlind == "tritanopia" )
     {
-        hexCodes := ["0x9E414F", "0xCC7F8D", "0xAC525F", "0xCE818E", "0xAF5A67", "0xD08391", "0xB56471", "0xD28694", "0xBA6A77", "0xD58A98", "0xBA727F", "0xD88F9B"]
-        boss_health_colors := findAllColorsBetween(hexCodes[brightnessIndex*2-1], hexCodes[brightnessIndex*2])
+        ; Tritanopia
+        ; brightness | RGB Dark | RGB Bright
+        ; 1 | 148, 54, 66 | 193, 88, 102
+        ; 2 | 158, 66, 79 | 201, 102, 116
+        ; 3 | 169, 81, 94 | 208, 116, 130
+        ; 4 | 178, 93, 106 | 213, 128, 141
+        ; 5 | 184, 102, 115 | 216, 136, 149
+        ; 6 | 189, 110, 123 | 219, 144, 156
+        ; 7 | 193, 116, 128 | 222, 149, 160
+        RGBMedians:= [[170, 71, 84], [179, 84, 97], [188, 98, 112], [195, 110, 123], [200, 119, 132], [204, 127, 139], [207, 132, 144]]
     }
-
+    boss_health_colors := RGBMedians[brightnessLevel]
 
     Hotkey, %settingsGUIHotkey%, ShowSettingsGUI
     Hotkey, %startAndStopDPS%, manualDPSPhase
+    Hotkey, %closeScriptHotkey%, close_the_script
     Hotkey, %reloadScriptHotkey%, reload_the_script
     Return
 }
@@ -319,99 +360,86 @@ check_destiny_open:
 Return
 
 ; calculates the number of pixels in the bitmap that fall withing the healthbar color range
-bossHealthPercentage(pBitmap, has_final=0)
-{
+bossHealthPercentage(pBitmap, has_final=0, tolerance=30) {
+    global boss_health_colors
     totalPixels := 0
     healthBarPixels := 0
     Gdip_GetImageDimensions(pBitmap, w, h)
     x := 0
     y := 0
+
     loop %h%
     {
         loop %w%
         {
             totalPixels += 1
             color := Gdip_GetPixel(pBitmap, x, y)
-            if (boss_health_colors.HasKey(color))
+
+            ; Extract RGB
+            red := (color >> 16) & 0xFF
+            green := (color >> 8) & 0xFF
+            blue := color & 0xFF
+
+            validColor := 1
+            if (Abs(red - boss_health_colors[1]) > tolerance)
+                validColor := 0
+            if (Abs(green - boss_health_colors[2]) > tolerance)
+                validColor := 0
+            if (Abs(blue - boss_health_colors[3]) > tolerance)
+                validColor := 0
+
+            if (validColor = 1)
                 healthBarPixels += 1
+
             x += 1
         }
         x := 0
         y += 1
     }
+
     loop, % has_final
     {
         totalPixels -= 2
         if (!1080pResolution)
             totalPixels -= 7
     } 
+
     return (healthBarPixels / totalPixels) * 100
 }
 
-; functions for getting every possible color the bosses healthbar could be
-    findAllColorsBetween(darkColor, LightColor)
-    {
-        darkArray := convertToRGB(darkColor) 
-        lightArray := convertToRGB(lightColor) 
-        returnHashTable := {}
-        redDifference := lightArray[1] - darkArray[1] + 1
-        greenDifference := lightArray[2] - darkArray[2] + 1
-        blueDifference := lightArray[3] - darkArray[3] + 1
-        redIndex := 0
-        greenIndex := 0
-        blueIndex := 0
-        loop, %redDifference%
-        {
-            loop, %greenDifference%
-            {
-                loop, %blueDifference%
-                {
-                    tempColorArray := [(darkArray[1]+redIndex), (darkArray[2]+greenIndex), (darkArray[3]+blueIndex)]
-                    tempColor := format("{:s}", convertToHex(tempColorArray))
-                    returnHashTable[tempColor] := 1
-                    blueIndex++
-                }
-                blueIndex := 0
-                greenIndex++
-            }
-            greenIndex := 0
-            redIndex++
-        }
-        return returnHashTable
-    }
+convertToHex(array)
+{
+    return format("0xff{:02x}{:02x}{:02x}", array*) 
+}
 
+convertToRGB(color) 
+{
+    red := "0x" . SubStr(color, 3, 2)
+    green := "0x" . SubStr(color, 5, 2)
+    blue := "0x" . SubStr(color, 7, 2)
+    array := [format("{:d}", red), format("{:d}", green), format("{:d}", blue)]
     convertToHex(array)
-    {
-        return format("0xff{:02x}{:02x}{:02x}", array*) 
-    }
-
-    convertToRGB(color) 
-    {
-        red := "0x" . SubStr(color, 3, 2)
-        green := "0x" . SubStr(color, 5, 2)
-        blue := "0x" . SubStr(color, 7, 2)
-        array := [format("{:d}", red), format("{:d}", green), format("{:d}", blue)]
-        convertToHex(array)
-        return array
-    }
-; =============================
+    return array
+}
 
 Return
 
-; this i sthe main driving fucntion in this script
+; this is the main driving fucntion in this script
 calculateDPS(bossName)
 {
+    global start_health
     global dps_start_time
     global total_damage := 0
     global highest_dps := 0
     global last_boss_hp_percent
     global time_of_last_damage
+    global boss_max_hp
 
     stop_loop := 0
 
     boss_max_hp := boss_health_pool[bossName]
     final_stand := boss_final_stand[bossName]
-    
+
     If (bossName == "default with final stand" || bossName == "default")
         is_default := 1
     Else
@@ -605,8 +633,41 @@ Return
 ; Return
 
 reload_the_script:
-    Run, %A_ScriptDir%\DDT.exe
-    ExitApp
+reload
 return
+
+close_the_script:
+ExitApp
+return
+
+F6::
+    global sleep_time_seconds := 90
+    global startTime := A_TickCount
+    global beast := ""
+    global start_damage := percent_dealt
+    SetTimer, damage_test, % sleep_time_seconds*1000
+    SetTimer, increment_damage, 50
+return
+
+increment_damage:
+    temp_var := (percent_dealt - start_damage)*boss_max_hp
+    beast := beast "`n" (A_TickCount - startTime) . "," . temp_var
+return
+
+damage_test:
+    SetTimer, damage_test, off
+    SetTimer, increment_damage, off
+    damage_done := FormatWithCommas(Round((percent_dealt - start_damage)*boss_max_hp, 0))
+    temp_dps := FormatWithCommas(Round((percent_dealt - start_damage)*boss_max_hp/sleep_time_seconds, 0))
+    info = %damage_done% damage dealt in %sleep_time_seconds% seconds`n %temp_dps% DPS
+    Clipboard := info "`n" beast
+    MsgBox, % info
+
+    ; Save the data to a CSV file
+    FileDelete, dps.csv ; delete the old file if it exists
+    time := SubStr(A_Hour "-" A_Min "-" A_Sec, 1, 8)
+    FileAppend, %beast%, %time%.csv
+return
+
 
 ^Esc::ExitApp
