@@ -92,7 +92,7 @@ Switch this option on for optimal performance on ultrawide 3440x1440 monitors. Y
 Set this to match your in-game colorblind setting. The accepted options are "Normal", "Deuteranopia", "Protanopia", and "Tritanopia".
 
 #### Brightness Level
-Adjust the brightness level of the program to match your screen. Supported brightness options are: 2, 3, 4, 5, 6, 7. Lower brightness options may be less consistent.
+Adjust the brightness level of the program to match your game settings.
 
 ## 🙏 Credits 🙏
 Thank you to Urnan for the awesome logo for DDT. Check out more of his work here 
